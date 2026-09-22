@@ -17,6 +17,7 @@ import { WasmEngine } from "./wasm-engine.mjs";
 import { RelayRtcTransport } from "./relay-transport.mjs";
 import { SignalingBridge } from "./signaling.mjs";
 import { AudioFeeder } from "./audio-feeder.mjs";
+import { StreamFeeder } from "./stream-feeder.mjs";
 import { CallState } from "./types.mjs";
 export { CallState } from "./types.mjs";
 const SHA256_LEN = 32;
@@ -74,6 +75,8 @@ export class ActiveCall extends EventEmitter {
     #ended = false;
     /** @internal mirrors the source path for the audio feeder */
     _audioSource = "silence";
+    /** @internal set when `audioSource` is `"stream"` */
+    _stream = null;
     constructor(callId, engine, durationMs) {
         super();
         this.callId = callId;
@@ -104,6 +107,21 @@ export class ActiveCall extends EventEmitter {
         catch { }
     };
     waitForEnd = () => this.#endPromise;
+    /**
+     * Stream mode only (`audioSource: "stream"`): queue mono Float32 PCM at
+     * 16 kHz for the uplink. Audio pushed before the call connects is kept.
+     */
+    pushAudio = (pcm) => {
+        if (!this._stream)
+            throw new Error('pushAudio requires audioSource: "stream"');
+        this._stream.push(pcm);
+    };
+    /** Stream mode only: queue a trailing partial frame (end of an utterance). */
+    flushAudio = () => { this._stream?.flush(); };
+    /** Stream mode only: drop queued uplink audio, e.g. when the user barges in. */
+    clearAudio = () => { this._stream?.clear(); };
+    /** Stream mode only: chunks (20 ms each at 16 kHz) still waiting to be sent. */
+    get queuedAudioChunks() { return this._stream?.queuedChunks ?? 0; }
     /** @internal — called by VoipClient on WASM call-state change */
     _updateState = (state) => {
         this.#state = state;
@@ -146,11 +164,18 @@ export class VoipClient {
     #captureChannels = 1;
     #captureFramesPerChunk = 320;
     #feeder = null;
-    constructor(config) {
+    #wsHandlers = [];
+    #ownsSocket = false;
+    constructor(config = {}) {
         this.#config = config;
     }
+    /** True once the VoIP stack is up (after connect() or attach()). */
+    get ready() { return this.#engine !== null; }
     /** Connect to WhatsApp and bring up the WASM VoIP stack. */
     connect = async () => {
+        if (!this.#config.authDir)
+            throw new Error("connect() requires authDir; use attach(sock) for an existing socket.");
+        this.#ownsSocket = true;
         this.#baileys = await loadBaileys();
         const { useMultiFileAuthState, default: makeWASocket, DisconnectReason } = this.#baileys;
         const makeSocket = makeWASocket ?? this.#baileys.makeWASocket ?? this.#baileys;
@@ -220,6 +245,44 @@ export class VoipClient {
             };
             connectSocket();
         });
+        await this.#bootstrap();
+    };
+    /**
+     * Bring up the VoIP stack on a Baileys socket the caller already owns and
+     * keeps alive (auth, reconnects, QR). The socket must be open. Never touches
+     * process-wide handlers. Call detach() before the socket is replaced.
+     */
+    attach = async (sock) => {
+        if (this.#engine)
+            throw new Error("Already attached. Call detach() first.");
+        if (!sock?.ws || !sock?.authState?.creds?.me?.id) {
+            throw new Error("attach() needs an open, authenticated Baileys socket.");
+        }
+        this.#ownsSocket = false;
+        this.#sock = sock;
+        await this.#bootstrap();
+    };
+    /** Tear down the VoIP stack but leave an attached socket running. */
+    detach = () => {
+        this.#activeCall?._forceEnd("disconnect");
+        this.#activeCall = null;
+        this.#handleAudioCaptureStop();
+        for (const [event, handler] of this.#wsHandlers) {
+            try {
+                this.#sock?.ws?.off?.(event, handler);
+            }
+            catch { }
+        }
+        this.#wsHandlers = [];
+        this.#relay?.closeAll();
+        this.#engine?.destroy();
+        this.#engine = null;
+        this.#relay = null;
+        this.#signaling = null;
+        if (!this.#ownsSocket)
+            this.#sock = null;
+    };
+    #bootstrap = async () => {
         this.#signaling = new SignalingBridge({ sock: this.#sock });
         await this.#signaling.init();
         this.#relay = new RelayRtcTransport({
@@ -249,14 +312,19 @@ export class VoipClient {
             this.#engine.updateNetworkMedium(2, 0);
         }
         catch { }
-        this.#sock.ws.on("CB:call", (node) => {
+        const onCall = (node) => {
+            if (!this.#signaling || !this.#engine)
+                return;
             this.#signaling.processIncomingCall(node, this.#engine, this.#activeCall?.callId ?? "");
-        });
-        this.#sock.ws.on("CB:receipt", (node) => {
-            if (!isCallReceiptNode(node))
+        };
+        const onReceipt = (node) => {
+            if (!isCallReceiptNode(node) || !this.#signaling || !this.#engine)
                 return;
             this.#signaling.processIncomingReceipt(node, this.#engine, this.#activeCall?.callId ?? "");
-        });
+        };
+        this.#sock.ws.on("CB:call", onCall);
+        this.#sock.ws.on("CB:receipt", onReceipt);
+        this.#wsHandlers = [["CB:call", onCall], ["CB:receipt", onReceipt]];
     };
     /** Place an outbound voice call. */
     call = async (phoneNumber, opts = {}) => {
@@ -287,7 +355,13 @@ export class VoipClient {
         const callId = ("00" + randomBytes(16).toString("hex").slice(2)).toUpperCase();
         const call = new ActiveCall(callId, this.#engine, durationMs);
         call._audioSource = audioSource;
+        if (audioSource === "stream")
+            call._stream = new StreamFeeder();
         this.#activeCall = call;
+        call.once("ended", () => {
+            if (this.#activeCall === call)
+                this.#activeCall = null;
+        });
         this.#engine.startCall({
             peerJid: peerLid,
             peerPn: targetPnJid,
@@ -302,14 +376,9 @@ export class VoipClient {
     };
     /** Tear down the WhatsApp socket and release resources. */
     disconnect = () => {
-        this.#activeCall?._forceEnd("disconnect");
-        this.#activeCall = null;
-        this.#relay?.closeAll();
-        this.#engine?.destroy();
-        this.#sock?.end?.();
-        this.#engine = null;
-        this.#relay = null;
-        this.#signaling = null;
+        this.detach();
+        if (this.#ownsSocket)
+            this.#sock?.end?.();
         this.#sock = null;
     };
     // ─── private ──────────────────────────────────────────────────────────────
@@ -347,6 +416,15 @@ export class VoipClient {
     #handleAudioCaptureStart = () => {
         if (!this.#engine || !this.#capturePtr)
             return;
+        const stream = this.#activeCall?._stream;
+        if (stream) {
+            stream.start(this.#captureSampleRate, this.#captureChannels, this.#captureFramesPerChunk, (chunk) => {
+                if (this.#engine && this.#capturePtr)
+                    this.#engine.sendAudioData(chunk, this.#capturePtr);
+            });
+            this.#feeder = stream;
+            return;
+        }
         const audioSource = this.#activeCall?._audioSource ?? "silence";
         this.#feeder = new AudioFeeder(this.#captureSampleRate, this.#captureChannels, this.#captureFramesPerChunk, (chunk) => {
             if (this.#engine && this.#capturePtr)

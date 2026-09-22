@@ -123,6 +123,35 @@ Returned by `client.call()`. Extends `EventEmitter`.
 
 - `call.callId: string`
 
+## Fork additions (Jpans-Co-Ltd)
+
+This fork adds two things needed to bridge calls to a realtime voice model:
+
+**Attach to your own socket.** `attach(sock)` brings up the VoIP stack on an
+open Baileys socket your app already manages (auth, reconnects, QR). It never
+touches process-wide handlers. `detach()` tears down the VoIP stack and leaves
+the socket running; call it before your socket is replaced on reconnect.
+
+```ts
+const client = new VoipClient()
+await client.attach(sock)
+// ...on reconnect: client.detach(); await client.attach(newSock)
+```
+
+**Live uplink.** `audioSource: "stream"` replaces the ffmpeg file decoder with
+a push queue:
+
+| Method | Purpose |
+| --- | --- |
+| `call.pushAudio(pcm)` | Queue mono Float32 PCM at 16 kHz, any length |
+| `call.flushAudio()` | Pad and send a trailing partial 20 ms frame |
+| `call.clearAudio()` | Drop queued audio (barge-in) |
+| `call.queuedAudioChunks` | 20 ms frames still waiting to be sent |
+
+Silence is sent on underflow, so the RTP clock never stalls. See
+`examples/stream.mts`. Also fixed: the client now clears its active call when
+a call ends, so a second `call()` no longer throws "A call is already active".
+
 ## How it works
 
 1. Baileys handles WhatsApp authentication, encryption, and signaling stanzas.

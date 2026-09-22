@@ -14,7 +14,10 @@ export type AudioConfig = {
 export type CallOptions = {
     /** Phone number, digits only (e.g. `"12345678901"`). */
     to: string;
-    /** Audio source: file path to MP3/WAV, or `"silence"` for an empty uplink. */
+    /**
+     * Audio source: file path to MP3/WAV, `"silence"` for an empty uplink, or
+     * `"stream"` to push live PCM with `call.pushAudio()`.
+     */
     audioSource?: string;
     /** Auto-hangup after N ms (default: 120000). */
     durationMs?: number;
@@ -31,8 +34,11 @@ export type CallEvents = {
 };
 /** Top-level SDK configuration. */
 export type VoipSdkConfig = {
-    /** Path to a Baileys multi-file auth state directory. */
-    authDir: string;
+    /**
+     * Path to a Baileys multi-file auth state directory. Required for
+     * `connect()`; omit when using `attach(sock)` with your own socket.
+     */
+    authDir?: string;
 };
 /** Mirrors the WhatsApp WASM `CallState` enum. */
 export declare const CallState: {
