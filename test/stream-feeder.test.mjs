@@ -13,17 +13,40 @@ test("re-chunks arbitrary pushes into frame-sized chunks", () => {
   assert.equal(f.queuedChunks, 3);
 });
 
-test("keeps audio pushed before start and sends it first, then silence", async () => {
+test("keeps audio pushed before start and plays it once buffered", async () => {
   const f = new StreamFeeder();
-  f.push(new Float32Array(320).fill(0.5));
+  // A full jitter buffer: playback starts on the first tick.
+  for (let i = 0; i < 6; i++) f.push(new Float32Array(320).fill(0.5));
   const chunks = [];
   f.start(16000, 1, 320, (c) => chunks.push(c));
   await wait(70);
   f.stop();
   assert.ok(chunks.length >= 2);
   assert.equal(chunks[0][0], 0.5);
-  assert.equal(chunks[1][0], 0);
-  assert.ok(f.underflowChunks >= 1);
+});
+
+test("holds a short burst briefly rather than breaking it up", async () => {
+  const f = new StreamFeeder();
+  f.push(new Float32Array(320).fill(0.5)); // below the jitter buffer
+  const chunks = [];
+  f.start(16000, 1, 320, (c) => chunks.push(c));
+
+  await wait(70);
+  assert.ok(chunks.every((c) => c[0] === 0), "plays silence while buffering");
+
+  await wait(400); // gives up waiting and plays what it has
+  f.stop();
+  assert.ok(chunks.some((c) => c[0] === 0.5), "eventually plays the audio");
+});
+
+test("re-buffers after the queue runs dry instead of alternating gaps", async () => {
+  const f = new StreamFeeder();
+  for (let i = 0; i < 6; i++) f.push(new Float32Array(320).fill(0.5));
+  const chunks = [];
+  f.start(16000, 1, 320, (c) => chunks.push(c));
+  await wait(200); // drains the queue
+  assert.ok(f.rebufferCount >= 1);
+  f.stop();
 });
 
 test("clear drops queued audio for barge-in", () => {

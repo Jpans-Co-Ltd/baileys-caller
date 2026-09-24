@@ -10,6 +10,15 @@
  */
 /** Cap on buffered audio (~20 s at 16 kHz / 320-frame chunks). */
 const MAX_QUEUED_CHUNKS = 1000;
+/**
+ * Chunks to hold before playback starts, and again after the queue runs dry
+ * (~120 ms at 16 kHz). A realtime model delivers audio in bursts; without a
+ * small jitter buffer every gap between bursts becomes an audible break in
+ * the middle of a word.
+ */
+const JITTER_CHUNKS = 6;
+/** Never stall longer than this waiting for the buffer to fill. */
+const MAX_REBUFFER_MS = 400;
 export class StreamFeeder {
     #queue = [];
     #partial = null;
@@ -23,6 +32,10 @@ export class StreamFeeder {
     droppedChunks = 0;
     underflowChunks = 0;
     chunksEmitted = 0;
+    rebufferCount = 0;
+    /** True while waiting for the jitter buffer to fill; silence goes out. */
+    #buffering = true;
+    #bufferingSinceMs = 0;
     /** Chunks waiting to be sent (each is one frame interval of audio). */
     get queuedChunks() {
         return this.#queue.length;
@@ -45,6 +58,8 @@ export class StreamFeeder {
         this.#onChunk = onChunk;
         this.#running = true;
         this.#nextEmitAtMs = 0;
+        this.#buffering = true;
+        this.#bufferingSinceMs = Date.now();
         this.#scheduleNext();
     };
     stop = () => {
@@ -54,6 +69,7 @@ export class StreamFeeder {
             this.#emitTimer = null;
         }
         this.#onChunk = null;
+        this.#buffering = true;
         this.clear();
     };
     /** Queue PCM samples (mono Float32 in [-1, 1] at the capture rate). */
@@ -94,6 +110,9 @@ export class StreamFeeder {
         this.#queue = [];
         this.#partial = null;
         this.#partialLen = 0;
+        // The next audio is a fresh utterance: buffer it before playing.
+        this.#buffering = true;
+        this.#bufferingSinceMs = Date.now();
     };
     #drainAll = () => {
         const total = this.#queue.length * this.#chunkSamples + this.#partialLen;
@@ -125,11 +144,44 @@ export class StreamFeeder {
             this.#scheduleNext();
         }, delayMs);
     };
+    #startBuffering = () => {
+        if (this.#buffering) {
+            // Keep a clock running even if we were already waiting, or the
+            // time-based escape hatch below never fires.
+            if (this.#bufferingSinceMs === 0)
+                this.#bufferingSinceMs = Date.now();
+            return;
+        }
+        this.#buffering = true;
+        this.#bufferingSinceMs = Date.now();
+        this.rebufferCount += 1;
+    };
+    /** Silence while the buffer refills, so speech plays as one piece. */
+    #shouldHoldForBuffer = () => {
+        if (!this.#buffering)
+            return false;
+        if (this.#bufferingSinceMs === 0)
+            this.#bufferingSinceMs = Date.now();
+        const filled = this.#queue.length >= JITTER_CHUNKS;
+        const waitedTooLong = Date.now() - this.#bufferingSinceMs > MAX_REBUFFER_MS;
+        if (filled || waitedTooLong) {
+            this.#buffering = false;
+            this.#bufferingSinceMs = 0;
+            return false;
+        }
+        return true;
+    };
     #flushOne = () => {
+        if (this.#shouldHoldForBuffer()) {
+            this.#onChunk?.(new Float32Array(this.#chunkSamples));
+            return;
+        }
         let chunk = this.#queue.shift();
         if (!chunk) {
             chunk = new Float32Array(this.#chunkSamples);
             this.underflowChunks += 1;
+            // Refill before resuming, instead of alternating speech and silence.
+            this.#startBuffering();
         }
         this.chunksEmitted += 1;
         this.#onChunk?.(chunk);

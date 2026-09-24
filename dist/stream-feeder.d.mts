@@ -13,6 +13,7 @@ export declare class StreamFeeder {
     droppedChunks: number;
     underflowChunks: number;
     chunksEmitted: number;
+    rebufferCount: number;
     /** Chunks waiting to be sent (each is one frame interval of audio). */
     get queuedChunks(): number;
     /**
