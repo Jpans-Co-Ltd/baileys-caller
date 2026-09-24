@@ -26,6 +26,13 @@ export { CallState } from "./types.mjs";
 
 const SHA256_LEN = 32;
 
+/**
+ * How long to wait for the stack to confirm a local hang-up before ending the
+ * call ourselves. Without this, a hang-up the stack never reports would leave
+ * `ended` unfired and `waitForEnd()` pending forever.
+ */
+const HANGUP_CONFIRM_MS = 2500;
+
 const loadBaileys = async (): Promise<any> => {
   try {
     return await import("@whiskeysockets/baileys");
@@ -83,6 +90,8 @@ export class ActiveCall extends EventEmitter {
   #endResolver!: (reason: string) => void;
   readonly #endPromise: Promise<string>;
   #endTimer: NodeJS.Timeout | null = null;
+  #hangUpTimer: NodeJS.Timeout | null = null;
+  #hangUpRequested = false;
   #ended = false;
 
   /** @internal mirrors the source path for the audio feeder */
@@ -106,10 +115,14 @@ export class ActiveCall extends EventEmitter {
   get state(): CallState { return this.#state; }
 
   end = (): void => {
-    if (this.#ended) return;
-    this.#ended = true;
+    if (this.#ended || this.#hangUpRequested) return;
+    this.#hangUpRequested = true;
     if (this.#endTimer) { clearTimeout(this.#endTimer); this.#endTimer = null; }
     try { this.engine.endCall(0, true); } catch {}
+    // Normally the stack reports Idle/Ending right after and _forceEnd runs;
+    // this only covers the case where it never does.
+    this.#hangUpTimer = setTimeout(() => this._forceEnd("hangup"), HANGUP_CONFIRM_MS);
+    this.#hangUpTimer.unref?.();
   };
 
   mute = (muted: boolean): void => {
@@ -154,6 +167,7 @@ export class ActiveCall extends EventEmitter {
     if (this.#ended) return;
     this.#ended = true;
     if (this.#endTimer) { clearTimeout(this.#endTimer); this.#endTimer = null; }
+    if (this.#hangUpTimer) { clearTimeout(this.#hangUpTimer); this.#hangUpTimer = null; }
     this.emit("ended", reason);
     this.#endResolver(reason);
   };
