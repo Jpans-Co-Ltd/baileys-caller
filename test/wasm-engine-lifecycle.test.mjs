@@ -56,3 +56,17 @@ test("a destroyed engine can be garbage collected", async () => {
     next.destroy();
   }
 });
+
+test("the VoIP stack reports ready without waiting out the timeout", async () => {
+  // The runtime never calls onVoipReady; readiness used to take the full 15 s.
+  const engine = smallEngine();
+  await engine.initialize();
+  try {
+    const started = Date.now();
+    engine.initVoipStack("15550001111@s.whatsapp.net", "15550001111@s.whatsapp.net", "123456789012345@lid");
+    await engine.waitForVoipStackReady();
+    assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
+  } finally {
+    engine.destroy();
+  }
+});

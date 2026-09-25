@@ -881,6 +881,7 @@ export class WasmEngine {
     };
 
     on("loggingCallback", (data) => {
+      this.#noteStackLog(data?.message);
       if (!this.#config.enableLogs) return;
       const level = data?.level;
       const msg = data?.message ?? "";
@@ -1098,6 +1099,7 @@ export class WasmEngine {
       onCallEvent: (data: any) => callbacks.onCallEvent?.(data?.eventType, data?.eventDataJson),
       sendDataToRelay: (data: any) => callbacks.sendDataToRelay?.(data?.data, data?.ip, data?.port),
       loggingCallback: (data: any): void => {
+        this.#noteStackLog(data?.message);
         if (!this.#config.enableLogs) return;
         const level = data?.level;
         const msg = data?.message ?? "";
@@ -1302,6 +1304,17 @@ export class WasmEngine {
    * lets destroy() cut that link and wake the wait itself.
    */
   #globalWasmCallbacks: Record<string, unknown> | null = null;
+
+  /**
+   * WhatsApp's runtime never calls onVoipReady, so waitForVoipStackReady used
+   * to end only at its 15 s timeout. The stack is up once its call-event
+   * thread starts (~20 ms after initVoipStack), which it logs.
+   */
+  #noteStackLog = (message: unknown): void => {
+    if (this.#voipReadyResolver && typeof message === "string" && message.includes("call_event_proc started")) {
+      this.#voipReadyResolver();
+    }
+  };
 
   readonly #pendingWaits = new Set<{ array: Int32Array; index: number; settle: ((v: string) => void) | null }>();
 
