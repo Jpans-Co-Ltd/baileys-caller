@@ -39,6 +39,10 @@ export type VoipSdkConfig = {
      * `connect()`; omit when using `attach(sock)` with your own socket.
      */
     authDir?: string;
+    /** Workers pre-loaded for hooks WhatsApp's runtime does not use; see WasmEngineConfig. Default 20. */
+    pthreadPoolSize?: number;
+    /** Workers WhatsApp's runtime starts up front for its threads; see WasmEngineConfig. Default 20. */
+    runtimePthreadPoolSize?: number;
 };
 /** Mirrors the WhatsApp WASM `CallState` enum. */
 export declare const CallState: {
