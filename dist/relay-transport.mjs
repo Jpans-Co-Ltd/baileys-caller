@@ -256,6 +256,15 @@ export class RelayRtcTransport {
         }
         return { ...this.#totals, openConnections };
     };
+    /**
+     * Close every connection and forget the relay list, but stay usable: the
+     * next call's relay list opens fresh connections. For when a call ends.
+     */
+    closeConnections = () => {
+        for (const id of [...this.#connections.keys()])
+            this.#closeConnection(id);
+        this.#relayInfoById.clear();
+    };
     closeAll = async () => {
         this.#destroyed = true;
         for (const id of [...this.#connections.keys()])

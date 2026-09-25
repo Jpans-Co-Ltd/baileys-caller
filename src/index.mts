@@ -327,6 +327,8 @@ export class VoipClient {
     });
 
     this.#engine = new WasmEngine({
+      pthreadPoolSize: this.#config.pthreadPoolSize,
+      runtimePthreadPoolSize: this.#config.runtimePthreadPoolSize,
       callbacks: {
         onSignalingXmpp: (peerJid, callId, xmlPayload) =>
           this.#signaling!.sendSignaling(peerJid, callId, xmlPayload),
@@ -401,6 +403,9 @@ export class VoipClient {
     this.#activeCall = call;
     call.once("ended", () => {
       if (this.#activeCall === call) this.#activeCall = null;
+      // Each relay connection is a native WebRTC peer with its own threads and
+      // buffers; left open they outlive the call until the next relay list.
+      this.#relay?.closeConnections();
     });
 
     this.#engine.startCall({

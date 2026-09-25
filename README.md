@@ -152,6 +152,25 @@ Silence is sent on underflow, so the RTP clock never stalls. See
 `examples/stream.mts`. Also fixed: the client now clears its active call when
 a call ends, so a second `call()` no longer throws "A call is already active".
 
+**Memory.** The VoIP stack is a set of worker threads, each a V8 isolate
+holding the WASM module (~17 MB each). Two options size them:
+
+| Option | Default | What it is |
+| --- | --- | --- |
+| `runtimePthreadPoolSize` | 20 | Workers WhatsApp's runtime starts up front for its threads. It starts more on demand, so this trades memory for a slower first use. Bringing the stack up uses 3. |
+| `pthreadPoolSize` | 20 | Workers pre-loaded for the `__NODE_PTHREAD` hooks, which the runtime does not call. `0` is safe. |
+
+```ts
+new VoipClient({ pthreadPoolSize: 0, runtimePthreadPoolSize: 8 })
+```
+
+`detach()` now releases the whole stack: every worker (including the ones the
+runtime started itself), the engine's callbacks, and main-thread waits that
+nothing would wake once the workers were gone. Before, each detach/attach kept
+the old engine alive, and worker callbacks kept going to the first engine
+ever created. Relay connections are also closed when a call ends instead of
+staying open until the next call.
+
 ## How it works
 
 1. Baileys handles WhatsApp authentication, encryption, and signaling stanzas.
